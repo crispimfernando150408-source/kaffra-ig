@@ -1,0 +1,26 @@
+name: Publica stories (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      imagens:
+        description: 'Caminhos das imagens no repositório, separados por espaço (ex: posts/destaques/sobre.jpg posts/destaques/agentes.jpg)'
+        required: true
+      dry:
+        description: 'true para só resolver as URLs sem publicar'
+        required: false
+        default: 'false'
+
+jobs:
+  stories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Publicar stories
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+        run: node ig/stories-ci.mjs ${{ github.event.inputs.imagens }} ${{ github.event.inputs.dry == 'true' && '--dry' || '' }}
