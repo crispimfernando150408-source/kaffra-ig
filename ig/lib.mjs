@@ -108,3 +108,23 @@ export function paramsDoReel({ videoUrl, coverUrl, caption }) {
   else params.thumb_offset = '0';
   return params;
 }
+
+// Story: só olha a extensão do arquivo pra decidir imagem × vídeo.
+export function ehVideoStory(arquivo) {
+  return arquivo.toLowerCase().endsWith('.mp4');
+}
+
+// URL do arquivo do story no repositório. Imagem: raw.githubusercontent (serve image/jpeg, a API
+// aceita). Vídeo: raw serve octet-stream e o IG recusa, então vai por jsDelivr (serve video/mp4,
+// limite de 20 MB por arquivo). Sem GITHUB_REPOSITORY (dry local), devolve o caminho como está.
+export function urlDaStory({ arquivo, githubRepository, branch = 'main' }) {
+  if (!githubRepository) return arquivo;
+  return ehVideoStory(arquivo)
+    ? `https://cdn.jsdelivr.net/gh/${githubRepository}@${branch}/${arquivo}`
+    : `https://raw.githubusercontent.com/${githubRepository}/${branch}/${arquivo}`;
+}
+
+// Parâmetros do container de story. Vídeo manda video_url; imagem manda image_url.
+export function paramsDaStory({ url, video }) {
+  return video ? { media_type: 'STORIES', video_url: url } : { media_type: 'STORIES', image_url: url };
+}
