@@ -30,3 +30,10 @@ IG_ACCESS_TOKEN=x IG_USER_ID=x node ig/publish-ci.mjs --dry --date 2026-09-22
 3. Commit. O push fica com quem confirma a visibilidade do repositório.
 
 Reel: campo `video` com o mp4, e a capa é `images[0]`. Sem imagem, o primeiro quadro (`thumb_offset=0`).
+
+## Fila arquivada
+
+`posts/_arquivo/semana39/` — fila original (5 carrosséis sobre o processo da
+Kaffra). Substituída em 26/09/2026 pela fila atual (`posts/semana40/` a
+`posts/semana43/`), decisão do Fernando de não falar do processo da empresa
+e usar a série dos vídeos. Fica arquivada, sem uso.
