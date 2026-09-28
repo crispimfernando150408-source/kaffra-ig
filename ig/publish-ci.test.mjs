@@ -14,15 +14,36 @@ function respostaJson(status, corpo) {
 
 // ---------- fila em pasta ----------
 
-test('pickPostLocal acha o post cujo scheduleAt é o dia e ignora o resto', () => {
+test('pickPostLocal sem brtHour devolve todos os posts do dia, ignora o resto', () => {
   const dir = mkdtempSync(join(tmpdir(), 'kaffra-ig-'));
   const week = join(dir, 'semana39');
   mkdirSync(week);
   writeFileSync(join(week, 'post-a.json'), JSON.stringify({ scheduleAt: '2026-09-22T19:00:00-03:00' }));
   writeFileSync(join(week, 'post-b.json'), JSON.stringify({ scheduleAt: '2026-09-24T19:00:00-03:00' }));
   writeFileSync(join(week, 'nota.json'), '{}');
-  assert.equal(pickPostLocal({ todayBR: '2026-09-22', postsDir: dir }), join(week, 'post-a.json'));
-  assert.equal(pickPostLocal({ todayBR: '2026-10-01', postsDir: dir }), null);
+  assert.deepEqual(pickPostLocal({ todayBR: '2026-09-22', postsDir: dir }), [join(week, 'post-a.json')]);
+  assert.deepEqual(pickPostLocal({ todayBR: '2026-10-01', postsDir: dir }), []);
+});
+
+test('pickPostLocal com brtHour devolve só os posts do dia cujo horário já chegou, em ordem', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kaffra-ig-'));
+  const week = join(dir, 'semana40');
+  mkdirSync(week);
+  const doze = join(week, 'post-a.json');
+  const dezenove = join(week, 'post-b.json');
+  const outroDia = join(week, 'post-c.json');
+  writeFileSync(doze, JSON.stringify({ scheduleAt: '2026-09-28T12:00:00-03:00' }));
+  writeFileSync(dezenove, JSON.stringify({ scheduleAt: '2026-09-28T19:00:00-03:00' }));
+  writeFileSync(outroDia, JSON.stringify({ scheduleAt: '2026-09-29T12:00:00-03:00' }));
+
+  // antes das 12h: nenhum post do dia chegou ainda
+  assert.deepEqual(pickPostLocal({ todayBR: '2026-09-28', brtHour: 11, postsDir: dir }), []);
+  // 12h: só o do meio-dia
+  assert.deepEqual(pickPostLocal({ todayBR: '2026-09-28', brtHour: 12, postsDir: dir }), [doze]);
+  // 19h: os dois, em ordem de horário
+  assert.deepEqual(pickPostLocal({ todayBR: '2026-09-28', brtHour: 19, postsDir: dir }), [doze, dezenove]);
+  // 21h (cron atrasado): ainda os dois do dia, o de 12h continua na lista
+  assert.deepEqual(pickPostLocal({ todayBR: '2026-09-28', brtHour: 21, postsDir: dir }), [doze, dezenove]);
 });
 
 test('pickPostLocal com caminho explícito não varre a pasta', () => {

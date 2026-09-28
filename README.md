@@ -2,7 +2,11 @@
 
 Publica os carrosséis da Kaffra no Instagram pelo GitHub Actions. A fila é a pasta `posts/`. Não há dashboard.
 
-O cron dispara às 22:00 UTC (19h em Brasília), em minutos quebrados, na janela da noite. Se a mesma legenda já está no feed, não publica de novo. O token longo (60 dias) renova todo dia 1.
+O cron dispara duas vezes por dia, em minutos quebrados: janela do meio-dia (~12h BRT) e
+janela da noite (~19h BRT). A guarda de horário só aceita 11–23h BRT; fora disso (cron
+atrasado de madrugada) não publica. Cada run publica todos os posts do dia cujo horário
+já chegou (ex.: se o cron de 19h atrasar, o post das 12h sai junto). Se a mesma legenda já
+está no feed, não publica de novo. O token longo (60 dias) renova todo dia 1.
 
 ## Secrets
 
@@ -21,7 +25,9 @@ Nada disso entra no git. Os nomes estão em `.env.example`.
 IG_ACCESS_TOKEN=x IG_USER_ID=x node ig/publish-ci.mjs --dry --date 2026-09-22
 ```
 
-`--date` só funciona junto com `--dry`. Sem `--date`, o dry usa o dia de hoje em Brasília. Testes: `node --test ig/publish-ci.test.mjs`.
+`--date` só funciona junto com `--dry`. Sem `--date`, o dry usa o dia de hoje em Brasília.
+`IG_FAKE_HOUR` (também só com `--dry`) simula a hora BRT, pra testar qual post do dia já
+teria "chegado". Testes: `node --test` na raiz.
 
 ## Adicionar um post
 

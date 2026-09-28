@@ -1,16 +1,23 @@
-name: Publica IG 19h
+name: Publica IG
 
 on:
   schedule:
     # O GitHub DESCARTA/atrasa crons em hora cheia (muita gente agenda em :00).
-    # Solução: minutos "quebrados" e MUITAS tentativas na janela da noite (19–22h BRT).
-    # Idempotência garante que só 1 publica; o resto é no-op. Guarda de janela (18–23h BRT)
-    # impede post de madrugada. Só precisa que UMA dessas pegue.
+    # Solução: minutos "quebrados" e MUITAS tentativas nas duas janelas do dia
+    # (meio-dia ~12–13h BRT e noite ~19–22h BRT). Idempotência garante que só 1
+    # publica por post; o resto é no-op. Guarda de janela (11–23h BRT) impede post
+    # de madrugada. Só precisa que UMA tentativa de cada janela pegue.
+    - cron: '7 15 * * *'    # 12:07 BRT
+    - cron: '31 15 * * *'   # 12:31 BRT
+    - cron: '52 15 * * *'   # 12:52 BRT
+    - cron: '14 16 * * *'   # 13:14 BRT
+    - cron: '39 16 * * *'   # 13:39 BRT
     - cron: '9 22 * * *'    # 19:09 BRT
     - cron: '27 22 * * *'   # 19:27 BRT
     - cron: '44 22 * * *'   # 19:44 BRT
     - cron: '13 23 * * *'   # 20:13 BRT
     - cron: '38 23 * * *'   # 20:38 BRT
+    - cron: '4 0 * * *'     # 21:04 BRT (segundo post de hoje, 2026-09-28)
     - cron: '11 0 * * *'    # 21:11 BRT
     - cron: '41 0 * * *'    # 21:41 BRT
     - cron: '23 1 * * *'    # 22:23 BRT

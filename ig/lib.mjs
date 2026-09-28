@@ -86,18 +86,28 @@ export function dataEfetiva({ dateArg, dry, hoje }) {
   return hoje;
 }
 
-// Varre posts/*/post-*.json e acha o cujo scheduleAt (data) == hoje (BR). arg explícito
-// (caminho do post) tem prioridade, igual ao comportamento manual de sempre.
-export function pickPostLocal({ todayBR, arg, postsDir = 'posts', readdirSyncFn = readdirSync, readFileSyncFn = readFileSync, joinFn = join }) {
+// Varre posts/*/post-*.json e devolve TODOS os do dia (scheduleAt data == hoje BR) cujo
+// horário já chegou (hora BRT do scheduleAt <= brtHour), em ordem de horário — dois posts
+// por dia (12h e 19h) podem sair no mesmo run se o cron atrasar. Sem brtHour, não filtra por
+// hora (só pelo dia). arg explícito (caminho do post) tem prioridade e devolve como sempre,
+// igual ao comportamento manual de sempre.
+export function pickPostLocal({ todayBR, brtHour, arg, postsDir = 'posts', readdirSyncFn = readdirSync, readFileSyncFn = readFileSync, joinFn = join }) {
   if (arg) return arg;
+  const doDia = [];
   for (const week of readdirSyncFn(postsDir, { withFileTypes: true }).filter((d) => d.isDirectory())) {
     const dir = joinFn(postsDir, week.name);
     for (const f of readdirSyncFn(dir).filter((f) => /^post-.*\.json$/.test(f))) {
-      const p = JSON.parse(readFileSyncFn(joinFn(dir, f), 'utf8'));
-      if ((p.scheduleAt || '').slice(0, 10) === todayBR) return joinFn(dir, f);
+      const caminho = joinFn(dir, f);
+      const p = JSON.parse(readFileSyncFn(caminho, 'utf8'));
+      const schedule = p.scheduleAt || '';
+      if (schedule.slice(0, 10) !== todayBR) continue;
+      const horaMin = schedule.slice(11, 16); // "HH:MM"
+      if (brtHour != null && Number(schedule.slice(11, 13)) > brtHour) continue;
+      doDia.push({ caminho, horaMin });
     }
   }
-  return null;
+  doDia.sort((a, b) => (a.horaMin < b.horaMin ? -1 : a.horaMin > b.horaMin ? 1 : 0));
+  return doDia.map((x) => x.caminho);
 }
 
 // Parâmetros do container de reel. Com capa, manda cover_url (imagens[0] do post).
