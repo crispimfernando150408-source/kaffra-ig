@@ -7,7 +7,7 @@
 //   --date só vale junto com --dry (simula o dia, em America/Sao_Paulo).
 //   IG_FAKE_HOUR só vale junto com --dry (simula a hora BRT, igual --date simula o dia).
 import { readFileSync } from 'node:fs';
-import { criarGraph, dataEfetiva, formatarErro, paramsDoReel, pickPostLocal, pollContainer, sleep } from './lib.mjs';
+import { aquecerCdn, criarEPollar, criarGraph, dataEfetiva, formatarErro, paramsDoReel, pickPostLocal, sleep } from './lib.mjs';
 
 const argv = process.argv.slice(2);
 const DRY = argv.includes('--dry');
@@ -139,21 +139,19 @@ for (let i = 0; i < fontes.length; i++) {
   if (DRY) { console.log('--dry: resolvido, não publica.'); continue; }
 
   try {
-    // monta o container: REEL (vídeo), imagem única, ou carrossel
-    let containerId, maxPolls = 20;
-    if (videoUrl) {
-      containerId = (await graph(`${IG_USER_ID}/media`, { method: 'POST', params: paramsDoReel({ videoUrl, coverUrl: urls[0], caption }) })).id;
-      maxPolls = 40; // vídeo demora mais pra processar
-    } else if (urls.length === 1) {
-      containerId = (await graph(`${IG_USER_ID}/media`, { method: 'POST', params: { image_url: urls[0], caption } })).id;
-    } else {
+    // aquece o CDN (vídeo e capa/imagens) antes de pedir qualquer container à Meta
+    await aquecerCdn(videoUrl ? [videoUrl, urls[0]] : urls);
+
+    // monta o container: REEL (vídeo), imagem única, ou carrossel; recria uma vez se der ERROR
+    const maxPolls = videoUrl ? 40 : 20; // vídeo demora mais pra processar
+    const criar = async () => {
+      if (videoUrl) return (await graph(`${IG_USER_ID}/media`, { method: 'POST', params: paramsDoReel({ videoUrl, coverUrl: urls[0], caption }) })).id;
+      if (urls.length === 1) return (await graph(`${IG_USER_ID}/media`, { method: 'POST', params: { image_url: urls[0], caption } })).id;
       const children = [];
       for (const u of urls) children.push((await graph(`${IG_USER_ID}/media`, { method: 'POST', params: { image_url: u, is_carousel_item: 'true' } })).id);
-      containerId = (await graph(`${IG_USER_ID}/media`, { method: 'POST', params: { media_type: 'CAROUSEL', caption, children: children.join(',') } })).id;
-    }
-    console.log('container:', containerId);
-
-    await pollContainer({ graph, containerId, maxPolls, timeoutMs: IG_POLL_TIMEOUT });
+      return (await graph(`${IG_USER_ID}/media`, { method: 'POST', params: { media_type: 'CAROUSEL', caption, children: children.join(',') } })).id;
+    };
+    const containerId = await criarEPollar({ criar, graph, maxPolls, timeoutMs: IG_POLL_TIMEOUT });
 
     const pub = await graph(`${IG_USER_ID}/media_publish`, { method: 'POST', params: { creation_id: containerId } });
     console.log('PUBLICADO. media id:', pub.id);

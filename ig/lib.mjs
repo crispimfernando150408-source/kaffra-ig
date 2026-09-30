@@ -69,7 +69,11 @@ export async function pollContainer({ graph, containerId, maxPolls = 20, interva
     }
     const { status_code } = await graph(containerId, { params: { fields: 'status_code' } });
     if (status_code === 'FINISHED') return;
-    if (status_code === 'ERROR') throw new Error('Container deu ERROR no processamento.');
+    if (status_code === 'ERROR') {
+      const e = new Error('Container deu ERROR no processamento.');
+      e.containerError = true;
+      throw e;
+    }
     await sleepFn(intervaloMs);
   }
   throw new Error(`Container não terminou de processar depois de ${maxPolls} consultas (${containerId})`);
@@ -137,4 +141,45 @@ export function urlDaStory({ arquivo, githubRepository, branch = 'main' }) {
 // Parâmetros do container de story. Vídeo manda video_url; imagem manda image_url.
 export function paramsDaStory({ url, video }) {
   return video ? { media_type: 'STORIES', video_url: url } : { media_type: 'STORIES', image_url: url };
+}
+
+// Aquece o CDN: GET completo de cada URL de mídia, só segue com HTTP 200 e corpo > 0 bytes.
+// Até `tentativas` por URL, com espera entre elas. Se não der 200, lança com a URL no erro.
+export async function aquecerCdn(urls, { fetchFn = fetch, sleepFn = sleep, tentativas = 3, esperaMs = 5000, log = console.log } = {}) {
+  for (const url of urls.filter(Boolean)) {
+    let motivo = '';
+    for (let t = 1; t <= tentativas; t++) {
+      try {
+        const res = await fetchFn(url);
+        const corpo = await res.arrayBuffer();
+        const header = res.headers?.get?.('content-length');
+        const tamanho = corpo.byteLength || 0;
+        if (res.status === 200 && tamanho > 0 && (header == null || Number(header) > 0)) {
+          log(`CDN aquecido: ${url} (${tamanho} bytes)`);
+          break;
+        }
+        motivo = `HTTP ${res.status}, ${tamanho} bytes`;
+      } catch (e) {
+        motivo = e?.message || String(e);
+      }
+      if (t === tentativas) throw new Error(`CDN não entregou a mídia (${motivo}) após ${tentativas} tentativas: ${url}`);
+      await sleepFn(esperaMs);
+    }
+  }
+}
+
+// Cria o container e espera processar. Se der ERROR, recria uma vez (nova criação + poll).
+// `criar` é uma função que faz a(s) chamada(s) de criação e devolve o containerId.
+export async function criarEPollar({ criar, graph, maxPolls, timeoutMs, sleepFn = sleep, log = console.log }) {
+  for (let tentativa = 1; tentativa <= 2; tentativa++) {
+    const containerId = await criar();
+    log('container:', containerId);
+    try {
+      await pollContainer({ graph, containerId, maxPolls, timeoutMs, sleepFn });
+      return containerId;
+    } catch (e) {
+      if (!e.containerError || tentativa === 2) throw e;
+      log('container deu ERROR, recriando (tentativa 2)');
+    }
+  }
 }

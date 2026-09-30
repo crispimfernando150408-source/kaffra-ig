@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { comRetry, criarGraph, dataEfetiva, paramsDoReel, pickPostLocal, pollContainer } from './lib.mjs';
+import { aquecerCdn, criarEPollar, comRetry, criarGraph, dataEfetiva, paramsDoReel, pickPostLocal, pollContainer } from './lib.mjs';
 
 function respostaJson(status, corpo) {
   return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(corpo), json: async () => corpo };
@@ -167,4 +167,61 @@ test('paramsDoReel sem capa inclui thumb_offset e não tem cover_url', () => {
   assert.equal(params.share_to_feed, 'true');
   assert.equal(params.caption, 'legenda intacta do reel');
   assert.equal('cover_url' in params, false);
+});
+
+// ---------- aquecer CDN e recriar container ----------
+
+function resCdn(status, bytes) {
+  return { status, headers: { get: () => String(bytes) }, arrayBuffer: async () => new ArrayBuffer(bytes) };
+}
+const mudo = () => {};
+
+test('aquecerCdn segue com 200 e corpo > 0, um GET por URL', async () => {
+  const vistas = [];
+  await aquecerCdn(['https://cdn/v.mp4', 'https://cdn/c.jpg'], { fetchFn: async (u) => (vistas.push(u), resCdn(200, 10)), sleepFn: async () => {}, log: mudo });
+  assert.deepEqual(vistas, ['https://cdn/v.mp4', 'https://cdn/c.jpg']);
+});
+
+test('aquecerCdn com 2 falhas e 1 sucesso passa, esperando 5s entre tentativas', async () => {
+  const respostas = [resCdn(404, 0), resCdn(200, 0), resCdn(200, 10)];
+  const esperas = [];
+  await aquecerCdn(['https://cdn/v.mp4'], { fetchFn: async () => respostas.shift(), sleepFn: async (ms) => esperas.push(ms), log: mudo });
+  assert.equal(respostas.length, 0);
+  assert.deepEqual(esperas, [5000, 5000]);
+});
+
+test('aquecerCdn com 3 falhas lança erro claro', async () => {
+  let chamadas = 0;
+  await assert.rejects(
+    aquecerCdn(['https://cdn/v.mp4'], { fetchFn: async () => (chamadas++, resCdn(503, 0)), sleepFn: async () => {}, log: mudo }),
+    /CDN não entregou a mídia.*3 tentativas.*v\.mp4/,
+  );
+  assert.equal(chamadas, 3);
+});
+
+function graphFalso(statusPorContainer) {
+  const chamadas = [];
+  const graph = async (path, opts = {}) => {
+    chamadas.push(path);
+    if (opts.method === 'POST') return { id: `c${chamadas.filter((p) => p === 'u/media').length}` };
+    return { status_code: statusPorContainer[path] };
+  };
+  return { graph, chamadas };
+}
+
+test('criarEPollar: ERROR no primeiro container e FINISHED no segundo publica', async () => {
+  const { graph, chamadas } = graphFalso({ c1: 'ERROR', c2: 'FINISHED' });
+  const logs = [];
+  const criar = async () => (await graph('u/media', { method: 'POST' })).id;
+  const id = await criarEPollar({ criar, graph, maxPolls: 3, sleepFn: async () => {}, log: (...a) => logs.push(a.join(' ')) });
+  assert.equal(id, 'c2');
+  assert.equal(chamadas.filter((p) => p === 'u/media').length, 2);
+  assert.ok(logs.includes('container deu ERROR, recriando (tentativa 2)'));
+});
+
+test('criarEPollar: ERROR nos dois containers lança', async () => {
+  const { graph, chamadas } = graphFalso({ c1: 'ERROR', c2: 'ERROR' });
+  const criar = async () => (await graph('u/media', { method: 'POST' })).id;
+  await assert.rejects(criarEPollar({ criar, graph, maxPolls: 3, sleepFn: async () => {}, log: mudo }), /Container deu ERROR/);
+  assert.equal(chamadas.filter((p) => p === 'u/media').length, 2);
 });
