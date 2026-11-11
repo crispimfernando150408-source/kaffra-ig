@@ -125,7 +125,7 @@ export function dentroDaJanela(brtHour) {
 // pega); quem impede a duplicata é a checagem de legenda em publicarFila. Sem agoraBR, não
 // filtra por hora (só pelo dia). arg explícito (caminho do post) tem prioridade e volta como
 // veio, igual ao comportamento manual de sempre.
-export function pickPostLocal({ todayBR, agoraBR, arg, postsDir = 'posts', readdirSyncFn = readdirSync, readFileSyncFn = readFileSync, joinFn = join }) {
+export function pickPostLocal({ todayBR, agoraBR, arg, postsDir = 'posts', readdirSyncFn = readdirSync, readFileSyncFn = readFileSync, joinFn = join, warn = console.warn }) {
   if (arg) return arg;
   const doDia = [];
   for (const week of readdirSyncFn(postsDir, { withFileTypes: true }).filter((d) => d.isDirectory())) {
@@ -134,7 +134,10 @@ export function pickPostLocal({ todayBR, agoraBR, arg, postsDir = 'posts', readd
       const caminho = joinFn(dir, f);
       const p = JSON.parse(readFileSyncFn(caminho, 'utf8'));
       const schedule = p.scheduleAt || '';
-      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(schedule)) continue;
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(schedule)) {
+        if (schedule.slice(0, 10) === todayBR) warn(`aviso: ${caminho} sem hora no scheduleAt ("${schedule}"), não sai.`);
+        continue;
+      }
       if (schedule.slice(0, 10) !== todayBR) continue;
       const horaMin = schedule.slice(11, 16); // "HH:MM"
       if (agoraBR != null && horaMin > agoraBR) continue;
@@ -156,12 +159,14 @@ export async function idNoFeed({ graph, igUserId, caption, limite = 25 }) {
 
 // Publica uma lista de posts em ordem. Antes de cada um, checa a legenda no feed: se já
 // está, pula (é o que impede dois runs seguidos de duplicarem). Se a checagem falhar fora
-// do --dry, para o run inteiro (lança) pra nunca arriscar duplicata. Espera `esperaMs`
+// do --dry, para o run inteiro (lança) pra nunca arriscar duplicata. Falha ao publicar um
+// post não para os outros: vai para `falhas` e quem chama sai com erro. Espera `esperaMs`
 // entre duas publicações do mesmo run. `publicar(post)` monta e publica o container e
 // devolve o media id; `lerPost(caminho)` devolve { caption, images, video }.
 export async function publicarFila({ fontes, graph, igUserId, dry = false, lerPost, publicar, sleepFn = sleep, esperaMs = 60000, log = console.log, logErro = console.error }) {
   const publicados = [];
   const pulados = [];
+  const falhas = [];
   for (let i = 0; i < fontes.length; i++) {
     const fonte = fontes[i];
     const local = lerPost(fonte);
@@ -187,7 +192,17 @@ export async function publicarFila({ fontes, graph, igUserId, dry = false, lerPo
       continue;
     }
 
-    const id = await publicar(post);
+    let id;
+    try {
+      id = await publicar(post);
+    } catch (e) {
+      // Um post quebrado (imagem 404, container em ERROR) não segura o resto do dia: registra,
+      // segue para o próximo e o run termina com erro. O run seguinte tenta este de novo.
+      logErro(`Falha ao publicar ${fonte}:`, formatarErro(e));
+      falhas.push({ fonte, erro: formatarErro(e) });
+      if (i < fontes.length - 1) await sleepFn(esperaMs);
+      continue;
+    }
     if (dry) continue;
     log('PUBLICADO. media id:', id);
     publicados.push({ fonte, id });
@@ -195,7 +210,7 @@ export async function publicarFila({ fontes, graph, igUserId, dry = false, lerPo
     // Entre duas publicações do mesmo run, esperar (rate limit / não sobrecarregar o Graph).
     if (i < fontes.length - 1) await sleepFn(esperaMs);
   }
-  return { publicados, pulados };
+  return { publicados, pulados, falhas };
 }
 
 // Parâmetros do container de reel. Com capa, manda cover_url (imagens[0] do post).

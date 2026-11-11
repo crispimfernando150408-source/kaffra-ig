@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { aquecerCdn, criarEPollar, comRetry, criarGraph, dataEfetiva, dentroDaJanela, horaSimulada, paramsDoReel, pickPostLocal, pollContainer, publicarFila, relogioBR } from './lib.mjs';
 
 function respostaJson(status, corpo) {
@@ -222,6 +222,49 @@ test('publicarFila no --dry: checagem falhando não para, e nada é publicado', 
   });
   assert.equal(chamados.length, 3);
   assert.deepEqual(r.publicados, []);
+});
+
+test('publicarFila: um post que falha ao publicar não segura os outros, e o seguinte tenta de novo', async () => {
+  const { dir, porHora } = filaDoDia();
+  const conta = contaFalsa();
+  let quebrado = true;
+  const publicar = async (post) => {
+    if (quebrado && post.caption === 'legenda das 08:00') throw new Error('Container deu ERROR no processamento.');
+    return conta.publicar(post);
+  };
+  const opts = { graph: conta.graph, igUserId: 'u', lerPost, publicar, sleepFn: async () => {}, log: () => {}, logErro: () => {} };
+  const r1 = await publicarFila({ ...opts, fontes: pickPostLocal({ todayBR: '2026-11-12', agoraBR: '10:13', postsDir: dir }) });
+  assert.deepEqual(r1.falhas.map((f) => f.fonte), [porHora['08:00']]);
+  assert.deepEqual(r1.publicados.map((p) => p.fonte), [porHora['09:00'], porHora['10:00']]);
+  quebrado = false;
+  const r2 = await publicarFila({ ...opts, fontes: pickPostLocal({ todayBR: '2026-11-12', agoraBR: '11:13', postsDir: dir }) });
+  assert.deepEqual(r2.publicados.map((p) => p.fonte), [porHora['08:00'], porHora['11:00']]);
+  assert.equal(r2.pulados.length, 2);
+  assert.equal(conta.feed.length, 4);
+});
+
+test('pickPostLocal avisa do post de hoje sem hora no scheduleAt', () => {
+  const { dir } = filaDoDia();
+  const avisos = [];
+  pickPostLocal({ todayBR: '2026-11-12', agoraBR: '12:00', postsDir: dir, warn: (m) => avisos.push(m) });
+  assert.equal(avisos.length, 1);
+  assert.match(avisos[0], /post-sem-hora\.json sem hora/);
+});
+
+test('posts/: todo scheduleAt da fila tem -03:00 e horário que algum run do dia alcança (08:00 a 22:13)', () => {
+  const raiz = new URL('../posts/', import.meta.url);
+  const semanas = readdirSync(raiz, { withFileTypes: true }).filter((d) => d.isDirectory());
+  let vistos = 0;
+  for (const s of semanas) {
+    for (const f of readdirSync(new URL(`${s.name}/`, raiz)).filter((f) => /^post-.*\.json$/.test(f))) {
+      const { scheduleAt } = JSON.parse(readFileSync(new URL(`${s.name}/${f}`, raiz), 'utf8'));
+      assert.match(scheduleAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?-03:00$/, `${s.name}/${f}`);
+      const hhmm = scheduleAt.slice(11, 16);
+      assert.ok(hhmm >= '08:00' && hhmm <= '22:13', `${s.name}/${f} às ${hhmm} não sai em nenhum run`);
+      vistos++;
+    }
+  }
+  assert.ok(vistos > 0);
 });
 
 // ---------- retry (comRetry / criarGraph) ----------

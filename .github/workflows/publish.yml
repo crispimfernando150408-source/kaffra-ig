@@ -29,7 +29,10 @@ on:
         required: false
 
 # Um run por vez: dois runs simultâneos podiam checar o feed antes de o outro publicar e
-# duplicar o post. O run novo espera o anterior terminar (não cancela).
+# duplicar o post. O run em andamento nunca é cancelado. Na fila fica só UM run pendente: se
+# chegar outro, o GitHub cancela o pendente mais antigo. Para o cron não faz diferença (o run
+# seguinte pega tudo o que já chegou), mas um disparo manual pendente pode ser cancelado por
+# um cron: confira se ele rodou.
 concurrency:
   group: publica-ig
   cancel-in-progress: false
@@ -37,6 +40,8 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Um run travado seguraria os seguintes (concurrency). O que não sair fica para o próximo run.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -46,4 +51,5 @@ jobs:
         env:
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
-        run: node ig/publish-ci.mjs ${{ github.event.inputs.post }}
+          POST_MANUAL: ${{ github.event.inputs.post }}
+        run: node ig/publish-ci.mjs $POST_MANUAL

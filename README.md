@@ -9,13 +9,18 @@ todos os posts do dia cujo `scheduleAt` (HH:MM em BRT) já chegou: um post das 1
 run das 15:13; um das 15:30 espera o das 16:13. Se um cron falhar, o da hora seguinte pega o
 que ficou. Antes de cada post, o run olha as 25 mídias mais recentes do feed: se a mesma
 legenda já está lá, não publica de novo (é isso que impede dois runs seguidos de duplicarem;
-se a checagem falhar, o run para sem publicar). Um run por vez (`concurrency` no workflow):
-o run novo espera o anterior terminar. Entre duas publicações do mesmo run, 60 s de espera.
+se a checagem falhar, o run para sem publicar). Se um post falhar ao publicar (imagem 404,
+container em ERROR), o run segue com os outros e termina com erro; o run seguinte tenta o que
+falhou de novo. Um run por vez (`concurrency` no workflow): o run em andamento nunca é
+cancelado, mas na fila fica só um pendente (um disparo manual pendente pode ser substituído
+por um cron). Entre duas publicações do mesmo run, 60 s de espera; cada run tem até 120 min.
 
-Para muitos posts por dia (meta: 15 por conta, 10 no feed e 3 Reels por aqui):
+Para muitos posts por dia (meta: 15 por conta, sendo 10 no feed e 3 Reels por esta fila e
+2 stories, que hoje são manuais):
 
-- `scheduleAt` entre 08:00 e 22:00, de preferência em hora cheia. Post depois das 22:13 não
-  sai (não há run depois disso no dia), e post de um dia que passou não sai mais.
+- `scheduleAt` entre 08:00 e 22:00, sempre com `-03:00`, de preferência em hora cheia. Post
+  depois das 22:13 não sai (não há run depois disso no dia), e post de um dia que passou não
+  sai mais. O teste `posts/: scheduleAt...` recusa offset diferente e horário fora disso.
 - Um post das 22:00 só tem a chance do run das 22:13; o resto do dia tem a do run seguinte.
 - Legendas diferentes entre si: duas iguais no mesmo dia, a segunda é pulada.
 - A checagem olha só as 25 mídias mais recentes: com mais de 25 posts por dia (ou muito post

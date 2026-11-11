@@ -131,12 +131,13 @@ async function publicar(post) {
 // verdade = a própria conta). Dois runs seguidos no mesmo dia não duplicam; se a checagem
 // falhar fora do --dry, o run para sem publicar este post nem os seguintes.
 try {
-  const { publicados, pulados } = await publicarFila({
+  const { publicados, pulados, falhas } = await publicarFila({
     fontes, graph, igUserId: IG_USER_ID, dry: DRY,
     lerPost: (f) => JSON.parse(readFileSync(f, 'utf8')),
     publicar,
   });
-  if (!DRY) console.log(`Fim do run: ${publicados.length} publicado(s), ${pulados.length} já no feed.`);
+  if (!DRY) console.log(`Fim do run: ${publicados.length} publicado(s), ${pulados.length} já no feed, ${falhas.length} com falha.`);
+  if (falhas.length) process.exit(1);
 } catch (err) {
   if (!err.checagem) console.error('Falha ao publicar:', formatarErro(err));
   process.exit(1);
