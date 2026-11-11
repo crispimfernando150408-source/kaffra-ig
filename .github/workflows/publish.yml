@@ -2,34 +2,46 @@ name: Publica IG
 
 on:
   schedule:
-    # O GitHub DESCARTA/atrasa crons em hora cheia (muita gente agenda em :00).
-    # Solução: minutos "quebrados" e MUITAS tentativas nas duas janelas do dia
-    # (meio-dia ~12–13h BRT e noite ~19–22h BRT). Idempotência garante que só 1
-    # publica por post; o resto é no-op. Guarda de janela (11–23h BRT) impede post
-    # de madrugada. Só precisa que UMA tentativa de cada janela pegue.
-    - cron: '7 15 * * *'    # 12:07 BRT
-    - cron: '31 15 * * *'   # 12:31 BRT
-    - cron: '52 15 * * *'   # 12:52 BRT
-    - cron: '14 16 * * *'   # 13:14 BRT
-    - cron: '39 16 * * *'   # 13:39 BRT
-    - cron: '9 22 * * *'    # 19:09 BRT
-    - cron: '27 22 * * *'   # 19:27 BRT
-    - cron: '44 22 * * *'   # 19:44 BRT
+    # De hora em hora, das 8h às 22h BRT (UTC-3, sem horário de verão), no minuto 13.
+    # O GitHub atrasa/descarta crons em hora cheia (muita gente agenda em :00), por isso o
+    # minuto quebrado. Cada run publica os posts do dia cujo scheduleAt (HH:MM BRT) já
+    # chegou e que ainda não estão no feed (checagem de legenda). Se um cron falhar, o da
+    # hora seguinte pega o que ficou. Guarda de janela (8–23h BRT) impede post de madrugada.
+    - cron: '13 11 * * *'   # 08:13 BRT
+    - cron: '13 12 * * *'   # 09:13 BRT
+    - cron: '13 13 * * *'   # 10:13 BRT
+    - cron: '13 14 * * *'   # 11:13 BRT
+    - cron: '13 15 * * *'   # 12:13 BRT
+    - cron: '13 16 * * *'   # 13:13 BRT
+    - cron: '13 17 * * *'   # 14:13 BRT
+    - cron: '13 18 * * *'   # 15:13 BRT
+    - cron: '13 19 * * *'   # 16:13 BRT
+    - cron: '13 20 * * *'   # 17:13 BRT
+    - cron: '13 21 * * *'   # 18:13 BRT
+    - cron: '13 22 * * *'   # 19:13 BRT
     - cron: '13 23 * * *'   # 20:13 BRT
-    - cron: '38 23 * * *'   # 20:38 BRT
-    - cron: '4 0 * * *'     # 21:04 BRT (segundo post de hoje, 2026-09-28)
-    - cron: '11 0 * * *'    # 21:11 BRT
-    - cron: '41 0 * * *'    # 21:41 BRT
-    - cron: '23 1 * * *'    # 22:23 BRT
+    - cron: '13 0 * * *'    # 21:13 BRT
+    - cron: '13 1 * * *'    # 22:13 BRT
   workflow_dispatch:      # permite disparo manual pra testar
     inputs:
       post:
         description: 'Caminho de um post específico (opcional, ex: posts/semana39/post-01-manifesto.json)'
         required: false
 
+# Um run por vez: dois runs simultâneos podiam checar o feed antes de o outro publicar e
+# duplicar o post. O run em andamento nunca é cancelado. Na fila fica só UM run pendente: se
+# chegar outro, o GitHub cancela o pendente mais antigo. Para o cron não faz diferença (o run
+# seguinte pega tudo o que já chegou), mas um disparo manual pendente pode ser cancelado por
+# um cron: confira se ele rodou.
+concurrency:
+  group: publica-ig
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Um run travado seguraria os seguintes (concurrency). O que não sair fica para o próximo run.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -39,4 +51,5 @@ jobs:
         env:
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
-        run: node ig/publish-ci.mjs ${{ github.event.inputs.post }}
+          POST_MANUAL: ${{ github.event.inputs.post }}
+        run: node ig/publish-ci.mjs $POST_MANUAL

@@ -90,12 +90,42 @@ export function dataEfetiva({ dateArg, dry, hoje }) {
   return hoje;
 }
 
+// Relógio de Brasília: dia (YYYY-MM-DD), hora (0-23) e "HH:MM" de um instante.
+export function relogioBR(now = new Date()) {
+  const partes = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(now).map((p) => [p.type, p.value])
+  );
+  const hora = partes.hour === '24' ? '00' : partes.hour;
+  return { hojeBR: `${partes.year}-${partes.month}-${partes.day}`, brtHour: Number(hora), agoraBR: `${hora}:${partes.minute}` };
+}
+
+// IG_FAKE_HOUR (só no dry): "19" vira 19:00, "19:30" vira 19:30. Devolve "HH:MM" ou lança.
+export function horaSimulada(valor) {
+  const m = /^(\d{1,2})(?::(\d{2}))?$/.exec(String(valor).trim());
+  const h = m ? Number(m[1]) : NaN;
+  const min = m && m[2] != null ? Number(m[2]) : 0;
+  if (!m || h > 23 || min > 59) throw new Error('IG_FAKE_HOUR exige a hora 0-23 ou HH:MM');
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+}
+
+// Guarda de janela do cron: só publica de 8h a 23h BRT. Fora disso é cron atrasado
+// (ou madrugada) e não publica, pra não pegar o dia errado.
+export const JANELA_BRT = { de: 8, ate: 23 };
+export function dentroDaJanela(brtHour) {
+  return brtHour >= JANELA_BRT.de && brtHour <= JANELA_BRT.ate;
+}
+
 // Varre posts/*/post-*.json e devolve TODOS os do dia (scheduleAt data == hoje BR) cujo
-// horário já chegou (hora BRT do scheduleAt <= brtHour), em ordem de horário — dois posts
-// por dia (12h e 19h) podem sair no mesmo run se o cron atrasar. Sem brtHour, não filtra por
-// hora (só pelo dia). arg explícito (caminho do post) tem prioridade e devolve como sempre,
-// igual ao comportamento manual de sempre.
-export function pickPostLocal({ todayBR, brtHour, arg, postsDir = 'posts', readdirSyncFn = readdirSync, readFileSyncFn = readFileSync, joinFn = join }) {
+// horário já chegou (scheduleAt "HH:MM" <= agoraBR "HH:MM", ambos em BRT), em ordem de
+// horário. Um post das 19:30 não sai num run das 19:13: espera o run seguinte. Os do dia
+// que já chegaram continuam na lista em todo run do dia (se um cron falhar, o seguinte
+// pega); quem impede a duplicata é a checagem de legenda em publicarFila. Sem agoraBR, não
+// filtra por hora (só pelo dia). arg explícito (caminho do post) tem prioridade e volta como
+// veio, igual ao comportamento manual de sempre.
+export function pickPostLocal({ todayBR, agoraBR, arg, postsDir = 'posts', readdirSyncFn = readdirSync, readFileSyncFn = readFileSync, joinFn = join, warn = console.warn }) {
   if (arg) return arg;
   const doDia = [];
   for (const week of readdirSyncFn(postsDir, { withFileTypes: true }).filter((d) => d.isDirectory())) {
@@ -104,14 +134,83 @@ export function pickPostLocal({ todayBR, brtHour, arg, postsDir = 'posts', readd
       const caminho = joinFn(dir, f);
       const p = JSON.parse(readFileSyncFn(caminho, 'utf8'));
       const schedule = p.scheduleAt || '';
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(schedule)) {
+        if (schedule.slice(0, 10) === todayBR) warn(`aviso: ${caminho} sem hora no scheduleAt ("${schedule}"), não sai.`);
+        continue;
+      }
       if (schedule.slice(0, 10) !== todayBR) continue;
       const horaMin = schedule.slice(11, 16); // "HH:MM"
-      if (brtHour != null && Number(schedule.slice(11, 13)) > brtHour) continue;
+      if (agoraBR != null && horaMin > agoraBR) continue;
       doDia.push({ caminho, horaMin });
     }
   }
-  doDia.sort((a, b) => (a.horaMin < b.horaMin ? -1 : a.horaMin > b.horaMin ? 1 : 0));
+  doDia.sort((a, b) => (a.horaMin < b.horaMin ? -1 : a.horaMin > b.horaMin ? 1 : (a.caminho < b.caminho ? -1 : 1)));
   return doDia.map((x) => x.caminho);
+}
+
+// Idempotência: procura nas últimas `limite` mídias do feed uma com a MESMA legenda.
+// Devolve o id da mídia ou null. Erro do Graph propaga (quem chama decide).
+export async function idNoFeed({ graph, igUserId, caption, limite = 25 }) {
+  const recent = await graph(`${igUserId}/media`, { params: { fields: 'id,caption', limit: String(limite) } });
+  const alvo = (caption || '').trim();
+  const igual = (recent.data || []).find((m) => (m.caption || '').trim() === alvo);
+  return igual ? igual.id : null;
+}
+
+// Publica uma lista de posts em ordem. Antes de cada um, checa a legenda no feed: se já
+// está, pula (é o que impede dois runs seguidos de duplicarem). Se a checagem falhar fora
+// do --dry, para o run inteiro (lança) pra nunca arriscar duplicata. Falha ao publicar um
+// post não para os outros: vai para `falhas` e quem chama sai com erro. Espera `esperaMs`
+// entre duas publicações do mesmo run. `publicar(post)` monta e publica o container e
+// devolve o media id; `lerPost(caminho)` devolve { caption, images, video }.
+export async function publicarFila({ fontes, graph, igUserId, dry = false, lerPost, publicar, sleepFn = sleep, esperaMs = 60000, log = console.log, logErro = console.error }) {
+  const publicados = [];
+  const pulados = [];
+  const falhas = [];
+  for (let i = 0; i < fontes.length; i++) {
+    const fonte = fontes[i];
+    const local = lerPost(fonte);
+    const post = { file: fonte, caption: local.caption, images: local.images, video: local.video };
+    if (!post.images?.length && !post.video) throw new Error('Post sem imagens nem vídeo: ' + post.file);
+
+    let mediaIdExistente = null;
+    try {
+      mediaIdExistente = await idNoFeed({ graph, igUserId, caption: post.caption });
+    } catch (e) {
+      log('aviso: não deu pra checar duplicado:', formatarErro(e));
+      if (!dry) {
+        logErro('Checagem de duplicado falhou: não publico este post nem os seguintes do run, pra não arriscar duplicata.');
+        const err = new Error('checagem de duplicado falhou');
+        err.checagem = true;
+        throw err;
+      }
+    }
+
+    if (mediaIdExistente) {
+      log(`Já está no feed (mesma legenda): ${fonte}. Pulo pra não duplicar.`);
+      pulados.push(fonte);
+      continue;
+    }
+
+    let id;
+    try {
+      id = await publicar(post);
+    } catch (e) {
+      // Um post quebrado (imagem 404, container em ERROR) não segura o resto do dia: registra,
+      // segue para o próximo e o run termina com erro. O run seguinte tenta este de novo.
+      logErro(`Falha ao publicar ${fonte}:`, formatarErro(e));
+      falhas.push({ fonte, erro: formatarErro(e) });
+      if (i < fontes.length - 1) await sleepFn(esperaMs);
+      continue;
+    }
+    if (dry) continue;
+    log('PUBLICADO. media id:', id);
+    publicados.push({ fonte, id });
+
+    // Entre duas publicações do mesmo run, esperar (rate limit / não sobrecarregar o Graph).
+    if (i < fontes.length - 1) await sleepFn(esperaMs);
+  }
+  return { publicados, pulados, falhas };
 }
 
 // Parâmetros do container de reel. Com capa, manda cover_url (imagens[0] do post).

@@ -1,13 +1,13 @@
-// Publica os posts do DIA já vencidos (12h e/ou 19h BRT) no Instagram, rodando no GitHub
-// Actions (sem Mac). A fila é a pasta posts/<semana>/post-*.json. Não há dashboard.
+// Publica os posts do DIA já vencidos (scheduleAt <= agora, em BRT) no Instagram, rodando no
+// GitHub Actions (sem Mac). O cron roda de hora em hora, das 8h às 22h BRT. A fila é a pasta posts/<semana>/post-*.json. Não há dashboard.
 // Token e IG_USER_ID vêm de Secrets (process.env). Endpoint: graph.instagram.com.
 // Uso: node ig/publish-ci.mjs [caminho-do-post.json] [--dry] [--date YYYY-MM-DD]
 //   sem arg = escolhe pelo dia, todos os posts cujo scheduleAt já chegou ·
 //   --dry = resolve e loga cada post da lista, mas não publica nem cria container.
 //   --date só vale junto com --dry (simula o dia, em America/Sao_Paulo).
-//   IG_FAKE_HOUR só vale junto com --dry (simula a hora BRT, igual --date simula o dia).
+//   IG_FAKE_HOUR só vale junto com --dry (simula a hora BRT, "19" ou "19:30", igual --date simula o dia).
 import { readFileSync } from 'node:fs';
-import { aquecerCdn, criarEPollar, criarGraph, dataEfetiva, formatarErro, paramsDoReel, pickPostLocal, sleep } from './lib.mjs';
+import { JANELA_BRT, aquecerCdn, criarEPollar, criarGraph, dataEfetiva, dentroDaJanela, formatarErro, horaSimulada, paramsDoReel, pickPostLocal, publicarFila, relogioBR } from './lib.mjs';
 
 const argv = process.argv.slice(2);
 const DRY = argv.includes('--dry');
@@ -39,16 +39,13 @@ if (!IG_ACCESS_TOKEN || !IG_USER_ID) { console.error('Faltam Secrets IG_ACCESS_T
 const manual = !!argPost || DRY; // disparo manual ou --dry ignora as guardas de horário
 
 // "hoje" e "hora" em America/Sao_Paulo
-const now = new Date();
-const hojeBR = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
-let brtHour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Sao_Paulo', hour: '2-digit', hour12: false }).format(now));
+let { hojeBR, brtHour, agoraBR } = relogioBR(new Date());
 
 // IG_FAKE_HOUR só existe no dry, pra simular a hora BRT (--date já simula o dia).
 if (IG_FAKE_HOUR != null && IG_FAKE_HOUR !== '') {
   if (!DRY) { console.error('IG_FAKE_HOUR só vale com --dry'); process.exit(1); }
-  const fake = Number(IG_FAKE_HOUR);
-  if (!Number.isInteger(fake) || fake < 0 || fake > 23) { console.error('IG_FAKE_HOUR exige um inteiro 0-23'); process.exit(1); }
-  brtHour = fake;
+  try { agoraBR = horaSimulada(IG_FAKE_HOUR); } catch (err) { console.error(err.message); process.exit(1); }
+  brtHour = Number(agoraBR.slice(0, 2));
 }
 
 let todayBR;
@@ -59,19 +56,22 @@ try {
   process.exit(1);
 }
 
-// Guarda de janela: cron do GitHub atrasa (às vezes horas). Se cair fora de 11-23h,
+// Guarda de janela: cron do GitHub atrasa (às vezes horas). Se cair fora de 8-23h BRT,
 // é atraso (ou madrugada): não publico, pra não pegar o dia errado. Dentro da janela,
-// pickPostLocal já resolve só os posts cujo horário (12h/19h) já chegou.
-if (!manual && (brtHour < 11 || brtHour > 23)) {
-  console.log(`Agora são ${brtHour}h BRT, fora da janela 11-23h (cron atrasou). Não publico. Nada a fazer.`);
+// pickPostLocal resolve só os posts cujo horário (HH:MM) já chegou.
+const janela = `${JANELA_BRT.de}-${JANELA_BRT.ate}h`;
+if (!manual && !dentroDaJanela(brtHour)) {
+  console.log(`Agora são ${agoraBR} BRT, fora da janela ${janela} (cron atrasou). Não publico. Nada a fazer.`);
   process.exit(0);
 }
+if (DRY && !argPost && !dentroDaJanela(brtHour)) console.log(`--dry: ${agoraBR} BRT está fora da janela ${janela}; no cron, este run não publicaria nada.`);
 
 const IG_POLL_TIMEOUT = Number(IG_POLL_TIMEOUT_MS) || 10 * 60 * 1000;
 
-const escolhido = pickPostLocal({ todayBR, brtHour, arg: argPost });
+const escolhido = pickPostLocal({ todayBR, agoraBR, arg: argPost });
 const fontes = argPost ? [escolhido] : escolhido;
-if (!fontes.length) { console.log(`Nenhum post agendado pra hoje (${todayBR}) até ${brtHour}h BRT. Nada a fazer.`); process.exit(0); }
+if (!fontes.length) { console.log(`Nenhum post agendado pra hoje (${todayBR}) até ${agoraBR} BRT. Nada a fazer.`); process.exit(0); }
+if (!argPost) console.log(`${todayBR} ${agoraBR} BRT: ${fontes.length} post(s) do dia com horário já chegado.`);
 if (!GITHUB_REPOSITORY && !DRY) { console.error('Sem GITHUB_REPOSITORY (rode no Actions)'); process.exit(1); }
 
 // Imagens: raw.githubusercontent serve image/jpeg (a API aceita). Vídeo: raw serve
@@ -88,13 +88,9 @@ async function pickUrl(p) {
 
 const graph = criarGraph({ accessToken: IG_ACCESS_TOKEN });
 
-for (let i = 0; i < fontes.length; i++) {
-  const fonte = fontes[i];
-  const local = JSON.parse(readFileSync(fonte, 'utf8'));
-  const post = { file: fonte, caption: local.caption, images: local.images, video: local.video };
+// Resolve as URLs, loga e (fora do --dry) monta o container e publica. Devolve o media id.
+async function publicar(post) {
   const { caption, images, video } = post;
-  if (!images?.length && !video) throw new Error('Post sem imagens nem vídeo: ' + post.file);
-
   let urls, videoUrl;
   if (DRY && !GITHUB_REPOSITORY) {
     urls = images || [];
@@ -111,55 +107,38 @@ for (let i = 0; i < fontes.length; i++) {
     else console.log('capa do reel: sem imagem, usando o primeiro quadro (thumb_offset=0)');
   }
 
-  // Idempotência: se um post com esta MESMA legenda já está no feed, não republica.
-  // Fonte da verdade = a própria conta. Se a checagem falhar, nunca arrisco duplicado:
-  // fora do --dry, não publico este post nem os seguintes do run, e saio com aviso.
-  let mediaIdExistente = null;
-  let checagemFalhou = false;
-  try {
-    const recent = await graph(`${IG_USER_ID}/media`, { params: { fields: 'id,caption', limit: '25' } });
-    const igual = (recent.data || []).find((m) => (m.caption || '').trim() === (caption || '').trim());
-    if (igual) mediaIdExistente = igual.id;
-  } catch (e) {
-    checagemFalhou = true;
-    console.log('aviso: não deu pra checar duplicado:', formatarErro(e));
-  }
+  if (DRY) { console.log('--dry: resolvido, não publica.'); return null; }
 
-  if (checagemFalhou && !DRY) {
-    console.error('Checagem de duplicado falhou: não publico este post nem os seguintes do run, pra não arriscar duplicata.');
-    process.exit(1);
-  }
+  // aquece o CDN (vídeo e capa/imagens) antes de pedir qualquer container à Meta
+  await aquecerCdn(videoUrl ? [videoUrl, urls[0]] : urls);
 
-  if (mediaIdExistente) {
-    console.log('Este post já está no feed (mesma legenda). Pulo pra não duplicar.');
-    if (!DRY && i < fontes.length - 1) await sleep(60000);
-    continue;
-  }
+  // monta o container: REEL (vídeo), imagem única, ou carrossel; recria uma vez se der ERROR
+  const maxPolls = videoUrl ? 40 : 20; // vídeo demora mais pra processar
+  const criar = async () => {
+    if (videoUrl) return (await graph(`${IG_USER_ID}/media`, { method: 'POST', params: paramsDoReel({ videoUrl, coverUrl: urls[0], caption }) })).id;
+    if (urls.length === 1) return (await graph(`${IG_USER_ID}/media`, { method: 'POST', params: { image_url: urls[0], caption } })).id;
+    const children = [];
+    for (const u of urls) children.push((await graph(`${IG_USER_ID}/media`, { method: 'POST', params: { image_url: u, is_carousel_item: 'true' } })).id);
+    return (await graph(`${IG_USER_ID}/media`, { method: 'POST', params: { media_type: 'CAROUSEL', caption, children: children.join(',') } })).id;
+  };
+  const containerId = await criarEPollar({ criar, graph, maxPolls, timeoutMs: IG_POLL_TIMEOUT });
 
-  if (DRY) { console.log('--dry: resolvido, não publica.'); continue; }
+  const pub = await graph(`${IG_USER_ID}/media_publish`, { method: 'POST', params: { creation_id: containerId } });
+  return pub.id;
+}
 
-  try {
-    // aquece o CDN (vídeo e capa/imagens) antes de pedir qualquer container à Meta
-    await aquecerCdn(videoUrl ? [videoUrl, urls[0]] : urls);
-
-    // monta o container: REEL (vídeo), imagem única, ou carrossel; recria uma vez se der ERROR
-    const maxPolls = videoUrl ? 40 : 20; // vídeo demora mais pra processar
-    const criar = async () => {
-      if (videoUrl) return (await graph(`${IG_USER_ID}/media`, { method: 'POST', params: paramsDoReel({ videoUrl, coverUrl: urls[0], caption }) })).id;
-      if (urls.length === 1) return (await graph(`${IG_USER_ID}/media`, { method: 'POST', params: { image_url: urls[0], caption } })).id;
-      const children = [];
-      for (const u of urls) children.push((await graph(`${IG_USER_ID}/media`, { method: 'POST', params: { image_url: u, is_carousel_item: 'true' } })).id);
-      return (await graph(`${IG_USER_ID}/media`, { method: 'POST', params: { media_type: 'CAROUSEL', caption, children: children.join(',') } })).id;
-    };
-    const containerId = await criarEPollar({ criar, graph, maxPolls, timeoutMs: IG_POLL_TIMEOUT });
-
-    const pub = await graph(`${IG_USER_ID}/media_publish`, { method: 'POST', params: { creation_id: containerId } });
-    console.log('PUBLICADO. media id:', pub.id);
-  } catch (err) {
-    console.error('Falha ao publicar:', formatarErro(err));
-    process.exit(1);
-  }
-
-  // Entre dois posts do mesmo run, esperar 60s (rate limit / não sobrecarregar o Graph).
-  if (i < fontes.length - 1) await sleep(60000);
+// Idempotência: publicarFila checa a legenda de cada post no feed antes de publicar (fonte da
+// verdade = a própria conta). Dois runs seguidos no mesmo dia não duplicam; se a checagem
+// falhar fora do --dry, o run para sem publicar este post nem os seguintes.
+try {
+  const { publicados, pulados, falhas } = await publicarFila({
+    fontes, graph, igUserId: IG_USER_ID, dry: DRY,
+    lerPost: (f) => JSON.parse(readFileSync(f, 'utf8')),
+    publicar,
+  });
+  if (!DRY) console.log(`Fim do run: ${publicados.length} publicado(s), ${pulados.length} já no feed, ${falhas.length} com falha.`);
+  if (falhas.length) process.exit(1);
+} catch (err) {
+  if (!err.checagem) console.error('Falha ao publicar:', formatarErro(err));
+  process.exit(1);
 }
